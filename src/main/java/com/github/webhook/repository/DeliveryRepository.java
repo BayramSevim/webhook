@@ -10,4 +10,6 @@ import java.util.UUID;
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
     @EntityGraph(attributePaths = "subscription")
     List<Delivery> findByEventId(UUID eventId);
+
+    long countByEventId(UUID eventId);
 }

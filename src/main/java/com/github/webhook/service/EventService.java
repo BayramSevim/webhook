@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -31,11 +32,20 @@ public class EventService {
     }
 
     @Transactional
-    public EventResponse create(CreateEventRequest request){
+    public EventResponse create(CreateEventRequest request,String idempotencyKey){
+        Optional<Event> existing = eventRepository.findByTenantIdAndIdempotencyKey(request.tenantId(),idempotencyKey);
+
+        if(existing.isPresent()){
+            Event event = existing.get();
+            long count = deliveryRepository.countByEventId(event.getId());
+            return EventResponse.from(event,(int) count);
+        }
+
         Event event = new Event(
                 request.tenantId(),
                 request.eventType(),
-                request.payload().toString()
+                request.payload().toString(),
+                idempotencyKey
         );
 
         Event savedEvent = eventRepository.save(event);

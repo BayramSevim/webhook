@@ -29,13 +29,17 @@ public class Event {
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
+    @Column(length = 255,updatable = false)
+    private String idempotencyKey;
+
     protected Event() {
     }
 
-    public Event(String tenantId, String eventType, String payload) {
+    public Event(String tenantId, String eventType, String payload,String idempotencyKey) {
         this.tenantId = tenantId;
         this.eventType = eventType;
         this.payload = payload;
+        this.idempotencyKey = idempotencyKey;
     }
 
     @PrePersist
@@ -43,6 +47,8 @@ public class Event {
         this.createdAt = Instant.now();
     }
 
+
+    public String getIdempotencyKey() {return idempotencyKey;}
     public UUID getId() { return id; }
     public String getTenantId() { return tenantId; }
     public String getEventType() { return eventType; }

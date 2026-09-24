@@ -21,8 +21,8 @@ public class EventController {
     }
 
     @PostMapping
-    public ResponseEntity<EventResponse> create(@RequestBody @Valid CreateEventRequest request){
-        EventResponse response = eventService.create(request);
+    public ResponseEntity<EventResponse> create(@RequestBody @Valid CreateEventRequest request,@RequestHeader("Idempotency-Key") String idempotencyKey){
+        EventResponse response = eventService.create(request,idempotencyKey);
         return ResponseEntity.accepted().body(response);
     }
 }
