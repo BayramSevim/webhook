@@ -19,6 +19,14 @@ public class GlobalExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(EventNotFoundException.class)
+    public ProblemDetail handleNotFound(EventNotFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Event not found");
+        problem.setProperty("id", ex.getId());
+        return problem;
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
         List<FieldErrorResponse> errors = ex.getBindingResult().getFieldErrors().stream()

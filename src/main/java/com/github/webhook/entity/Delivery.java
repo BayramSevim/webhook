@@ -67,7 +67,7 @@ public class Delivery {
 
     public void markFailed(){
         this.status = DeliveryStatus.FAILED;
-        this.attemptCount = attemptCount + 1;
+        this.attemptCount++;
     }
 
 

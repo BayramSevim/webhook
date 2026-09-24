@@ -9,6 +9,10 @@ spring:
     hibernate:
       ddl-auto: validate
 
+logging:
+  level:
+    org.hibernate.SQL: debug
+
 management:
   endpoints:
     web:
