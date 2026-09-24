@@ -1,6 +1,5 @@
 package com.github.webhook.exception;
 
-import com.github.webhook.domain.exception.SubscriptionNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;

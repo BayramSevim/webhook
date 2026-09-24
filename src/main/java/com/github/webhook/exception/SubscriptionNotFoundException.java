@@ -1,4 +1,4 @@
-package com.github.webhook.domain.exception;
+package com.github.webhook.exception;
 
 import java.util.UUID;
 

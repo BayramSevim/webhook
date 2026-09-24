@@ -1,4 +1,4 @@
-package com.github.webhook.domain.entity;
+package com.github.webhook.entity;
 
 public enum DeliveryStatus {
     PENDING,

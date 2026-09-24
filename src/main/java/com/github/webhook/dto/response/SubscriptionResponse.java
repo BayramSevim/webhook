@@ -1,6 +1,6 @@
-package com.github.webhook.domain.dto.response;
+package com.github.webhook.dto.response;
 
-import com.github.webhook.domain.entity.Subscription;
+import com.github.webhook.entity.Subscription;
 
 import java.time.Instant;
 import java.util.List;

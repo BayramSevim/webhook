@@ -1,4 +1,4 @@
-package com.github.webhook.domain.entity;
+package com.github.webhook.entity;
 
 import jakarta.persistence.*;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -30,7 +30,6 @@ public class Event {
     private Instant createdAt;
 
     protected Event() {
-        // JPA icin
     }
 
     public Event(String tenantId, String eventType, String payload) {

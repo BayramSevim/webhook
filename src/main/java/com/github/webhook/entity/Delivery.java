@@ -1,4 +1,4 @@
-package com.github.webhook.domain.entity;
+package com.github.webhook.entity;
 import jakarta.persistence.*;
 
 import java.time.Instant;
@@ -59,8 +59,17 @@ public class Delivery {
         this.updatedAt = Instant.now();
     }
 
-    // Durum degistiren metotlar (markSending, markSucceeded, markFailed...)
-    // bilerek yazilmadi: bunlar is mantigi, onlari sen yazacaksin.
+    public void markSucceeded(){
+        this.status = DeliveryStatus.SUCCEEDED;
+        this.attemptCount++;
+        this.nextAttemptAt = null;
+    }
+
+    public void markFailed(){
+        this.status = DeliveryStatus.FAILED;
+        this.attemptCount = attemptCount + 1;
+    }
+
 
     public UUID getId() { return id; }
     public Event getEvent() { return event; }

@@ -1,4 +1,4 @@
-package com.github.webhook.domain.entity;
+package com.github.webhook.entity;
 
 import jakarta.persistence.*;
 import org.hibernate.annotations.JdbcTypeCode;

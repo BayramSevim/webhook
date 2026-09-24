@@ -1,4 +1,4 @@
-package com.github.webhook.domain.dto.request;
+package com.github.webhook.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;

@@ -1,10 +1,10 @@
-package com.github.webhook.subscription.service;
+package com.github.webhook.service;
 
-import com.github.webhook.domain.dto.request.CreateSubscriptionRequest;
-import com.github.webhook.domain.dto.response.SubscriptionResponse;
-import com.github.webhook.domain.entity.Subscription;
-import com.github.webhook.domain.exception.SubscriptionNotFoundException;
-import com.github.webhook.subscription.repository.SubscriptionRepository;
+import com.github.webhook.dto.request.CreateSubscriptionRequest;
+import com.github.webhook.dto.response.SubscriptionResponse;
+import com.github.webhook.entity.Subscription;
+import com.github.webhook.exception.SubscriptionNotFoundException;
+import com.github.webhook.repository.SubscriptionRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
