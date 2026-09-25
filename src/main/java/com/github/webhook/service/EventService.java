@@ -22,13 +22,13 @@ public class EventService {
     private final EventRepository eventRepository;
     private final SubscriptionRepository subscriptionRepository;
     private final DeliveryRepository deliveryRepository;
-    private final DeliverySender deliverySender;
 
-    public EventService(EventRepository eventRepository, SubscriptionRepository subscriptionRepository, DeliveryRepository deliveryRepository, DeliverySender deliverySender) {
+    public EventService(EventRepository eventRepository,
+                        SubscriptionRepository subscriptionRepository,
+                        DeliveryRepository deliveryRepository) {
         this.eventRepository = eventRepository;
         this.subscriptionRepository = subscriptionRepository;
         this.deliveryRepository = deliveryRepository;
-        this.deliverySender = deliverySender;
     }
 
     @Transactional
@@ -56,7 +56,6 @@ public class EventService {
                 .toList();
 
         deliveryRepository.saveAll(deliveries);
-        deliveries.forEach(deliverySender::send);
 
         return EventResponse.from(savedEvent,deliveries.size());
     }
