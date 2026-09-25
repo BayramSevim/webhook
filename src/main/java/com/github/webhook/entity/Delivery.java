@@ -70,6 +70,11 @@ public class Delivery {
         this.attemptCount++;
     }
 
+    public void markSending(Instant leaseUntil){
+        this.status = DeliveryStatus.SENDING;
+        this.nextAttemptAt = leaseUntil;
+    }
+
 
     public UUID getId() { return id; }
     public Event getEvent() { return event; }

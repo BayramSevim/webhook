@@ -17,23 +17,26 @@ public class DeliveryWorker {
     private static final int BATCH_SIZE = 10;
     private final DeliveryRepository deliveryRepository;
     private final DeliverySender deliverySender;
+    private final DeliveryStateService deliveryStateService;
 
-    public DeliveryWorker(DeliveryRepository deliveryRepository, DeliverySender deliverySender) {
+    public DeliveryWorker(DeliveryRepository deliveryRepository, DeliverySender deliverySender, DeliveryStateService deliveryStateService) {
         this.deliveryRepository = deliveryRepository;
         this.deliverySender = deliverySender;
+        this.deliveryStateService = deliveryStateService;
     }
 
     @Scheduled(fixedDelay = 5000)
-    @Transactional
     public void poll() {
-        List<Delivery> deliveries = deliveryRepository.findDue(BATCH_SIZE);
-        if(deliveries.isEmpty())
+        List<DeliveryJob> jobs = deliveryStateService.claimDue(BATCH_SIZE);
+        if(jobs.isEmpty())
             return;
 
-        log.info("Found {} due deliveries", deliveries.size());
-        deliveries.forEach(delivery -> {
-            log.info("Sending delivery {}", delivery.getId());
-            deliverySender.send(delivery);
+        log.info("Claimed {} deliveries", jobs.size());
+
+        jobs.forEach(job -> {
+            log.info("Sending delivery {}", job.deliveryId());
+            SendResult result = deliverySender.send(job);
+            deliveryStateService.recordResult(job.deliveryId(),result);
         });
     }
 }

@@ -18,7 +18,7 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
     @Query(value = """
         SELECT *
         FROM deliveries 
-        WHERE status = 'PENDING' 
+        WHERE status IN('PENDING','SENDING')
         AND next_attempt_at <= now()
         ORDER BY next_attempt_at 
         LIMIT :batchSize
