@@ -187,29 +187,33 @@ To see several workers sharing the same queue, start a second instance on anothe
 
 ### Idempotency: an application check plus a unique constraint
 
-<!-- Kodda "bu anahtar var mı?" kontrolü neden tek başına yetmedi? (İki Postman sekmesi deneyi: ikisi de aynı anda "yok" cevabı aldı)
-     Constraint patlayınca neden 500 değil 409 dönüyoruz? Müşteri ne yapmalı? (Aynı anahtar + aynı body ile tekrar dene) -->
+The service first looks up the `Idempotency-Key`; if it was already used, the stored response is returned. That check alone is not enough: when I sent the same key from two Postman tabs at the same time, both requests saw "not found" and both tried to insert. The `unique (tenant_id, idempotency_key)` constraint is the last line of defence and rejects the second insert.
+
+When the constraint fires the API answers `409 Conflict`, not `500`. Nothing unexpected went wrong on the server; the same request is simply still being processed. The client should wait briefly and retry with the same key and the same body.
 
 ### Outbox: using the `deliveries` table instead of a separate outbox table
 
-<!-- Neden HTTP çağrısı DB transaction'ı içinde yapılmamalı? (Geri alınamayan HTTP: Ayşe'nin stoğu düştü ama bizde olay yok)
-     Neden ayrı bir outbox tablosu açmadın? (Teslimat satırları olayla aynı transaction'da yazılıyor → zaten outbox) -->
+A database write can be rolled back, but an HTTP request that has already been sent cannot. If a webhook goes out and the transaction then rolls back, the subscriber has acted on an event that no longer exists on our side (the seller's stock went down, but we have no record of the order). So `POST /events` only commits the event and its deliveries, and a background worker sends them afterwards.
+
+I did not add a separate outbox table: the delivery rows are written in the same transaction as the event, so either both exist or neither does. The `deliveries` table already gives the outbox guarantee; a second table would only duplicate the same information.
 
 ### `FOR UPDATE SKIP LOCKED`: several workers, no double sends
 
-<!-- İki instance deneyinde ne gördün? (2 ms fark, aynı teslimat iki kez gitti, unique constraint sadece kaydı engelledi)
-     FOR UPDATE ne yapıyor, SKIP LOCKED ne ekliyor? (Çift gönderimi engellemek vs. birbirini beklememek) -->
+Running two instances showed the problem: the second worker could not see the first worker's uncommitted update, picked the same delivery 2 ms later and sent it again, so the subscriber received it twice. The unique constraint on `delivery_attempts` stopped the duplicate attempt row, but the HTTP request had already gone out.
+
+With `FOR UPDATE SKIP LOCKED` each worker locks the rows it claims and other workers skip locked rows. `FOR UPDATE` alone would also prevent the double send, but the other workers would wait for the lock; `SKIP LOCKED` lets them move on to other rows instead.
 
 ### Short transactions: claim → send → record
 
-<!-- Kilidi HTTP süresince tutmak neden kötü? (/delay/4 deneyi: bağlantı ve kilit 4 sn meşgul)
-     Kilit kalkınca diğer worker'ı ne durduruyor? (SENDING durumu)
-     Neden claimDue/recordResult ayrı bir sınıfta ve poll() neden @Transactional değil? (Self-invocation, dış transaction'a katılma) -->
+Keeping the transaction open during the HTTP call would hold a database connection and a row lock for as long as the subscriber takes to answer; slow subscribers could exhaust the connection pool. So a delivery is handled in three steps: a short transaction to claim it (`SENDING`), the HTTP call with no transaction, and a short transaction to record the result. After the claim commits, the lock is gone and the `SENDING` status keeps the row out of other workers' queries.
+
+The claim and record methods live in a separate `DeliveryStateService`, because `@Transactional` works through a Spring proxy and would be skipped on a call from within the same class. `poll()` itself is deliberately not `@Transactional`: otherwise the inner methods would join its transaction and the commit, and the lock release with it, would move to the very end.
 
 ### Lease: recovering deliveries stuck in `SENDING`
 
-<!-- Worker HTTP sırasında çökerse ne olur? next_attempt_at'i neden lease bitişi olarak kullandın?
-     Neden 2 dakika? (Batch 10 × en kötü 7 sn = 70 sn; tek isteğin timeout'u değil, batch'in toplamı) -->
+When a worker claims a delivery it sets the status to `SENDING` and writes the end of a 2-minute lease into `next_attempt_at`. If the worker dies before recording a result, the lease expires, the claim query picks the row up again and another worker sends it.
+
+The lease is sized for the whole batch, not a single request: deliveries in a batch are sent one after another, so the worst case is 10 × 7 s (2 s connect + 5 s read timeout) = 70 s. A shorter lease would let another worker reclaim deliveries that are still waiting their turn and send them twice.
 
 ## Known limitations (to be addressed in the next phases)
 
