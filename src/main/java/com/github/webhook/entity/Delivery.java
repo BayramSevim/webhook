@@ -65,14 +65,21 @@ public class Delivery {
         this.nextAttemptAt = null;
     }
 
-    public void markFailed(){
+    public void markFailed(Instant nextAttemptAt){
         this.status = DeliveryStatus.FAILED;
         this.attemptCount++;
+        this.nextAttemptAt = nextAttemptAt;
     }
 
     public void markSending(Instant leaseUntil){
         this.status = DeliveryStatus.SENDING;
         this.nextAttemptAt = leaseUntil;
+    }
+
+    public void markDead() {
+        this.status = DeliveryStatus.DEAD;
+        this.attemptCount ++;
+        this.nextAttemptAt = null;
     }
 
 

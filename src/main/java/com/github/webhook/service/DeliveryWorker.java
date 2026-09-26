@@ -34,9 +34,13 @@ public class DeliveryWorker {
         log.info("Claimed {} deliveries", jobs.size());
 
         jobs.forEach(job -> {
-            log.info("Sending delivery {}", job.deliveryId());
-            SendResult result = deliverySender.send(job);
-            deliveryStateService.recordResult(job.deliveryId(),result);
+           try{
+               log.info("Sending delivery {}", job.deliveryId());
+               SendResult result = deliverySender.send(job);
+               deliveryStateService.recordResult(job.deliveryId(),result);
+           } catch (Exception e) {
+               log.error("Delivery {} failed unexpectedly", job.deliveryId(), e);
+           }
         });
     }
 }

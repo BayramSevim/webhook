@@ -22,15 +22,17 @@ public class DeliveryStateService {
     private static final Duration LEASE = Duration.ofMinutes(2);
     private final DeliveryRepository deliveryRepository;
     private final DeliveryAttemptRepository deliveryAttemptRepository;
+    private final BackoffPolicy backoffPolicy;
 
-    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository) {
+    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy) {
         this.deliveryRepository = deliveryRepository;
         this.deliveryAttemptRepository = deliveryAttemptRepository;
+        this.backoffPolicy = backoffPolicy;
     }
 
     @Transactional
     public List<DeliveryJob> claimDue(int batchSize) {
-       return  deliveryRepository.findDue(batchSize)
+        return deliveryRepository.findDue(batchSize)
                 .stream()
                 .map(delivery -> {
                     delivery.markSending(Instant.now().plus(LEASE));
@@ -39,27 +41,37 @@ public class DeliveryStateService {
                             delivery.getSubscription().getUrl(),
                             delivery.getEvent().getEventType(),
                             delivery.getEvent().getPayload()
-                            );
+                    );
                 }).toList();
     }
 
     @Transactional
     public void recordResult(UUID deliveryId, SendResult result) {
         Delivery delivery = deliveryRepository.findById(deliveryId)
-                .orElseThrow(()-> new IllegalStateException("Delivery Not Found: " + deliveryId));
+                .orElseThrow(() -> new IllegalStateException("Delivery Not Found: " + deliveryId));
 
         if (result.succeeded())
             delivery.markSucceeded();
-         else
-            delivery.markFailed();
+        else {
+            int attemptsAfterThis = delivery.getAttemptCount() + 1;
+            if (backoffPolicy.shouldGiveUp(attemptsAfterThis))
+                delivery.markDead();
+            else {
+                Instant next = Instant.now().plus(backoffPolicy.delayAfter(attemptsAfterThis));
+                delivery.markFailed(next);
+            }
+        }
 
-         deliveryAttemptRepository.save(new DeliveryAttempt(
-                 delivery,
-                 delivery.getAttemptCount(),
-                 result.attemptedAt(),
-                 result.durationMs(),
-                 result.responseStatus(),
-                 result.errorMessage()
-         ));
+
+        deliveryAttemptRepository.save(new
+
+                DeliveryAttempt(
+                delivery,
+                delivery.getAttemptCount(),
+                result.attemptedAt(),
+                result.durationMs(),
+                result.responseStatus(),
+                result.errorMessage()
+        ));
     }
 }
