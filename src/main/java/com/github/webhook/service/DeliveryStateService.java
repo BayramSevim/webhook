@@ -39,6 +39,7 @@ public class DeliveryStateService {
                     return new DeliveryJob(
                             delivery.getId(),
                             delivery.getSubscription().getUrl(),
+                            delivery.getSubscription().getSecret(),
                             delivery.getEvent().getEventType(),
                             delivery.getEvent().getPayload()
                     );
