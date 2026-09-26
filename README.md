@@ -1,6 +1,6 @@
 # Webhook Delivery Service
 
-A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background and keeps a full audit trail of every attempt.
+A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background, signs every request and keeps a full audit trail of every attempt.
 
 ## What problem does it solve?
 
@@ -22,8 +22,8 @@ This service is that "push" layer:
 | 1.2 | Idempotency: rejecting duplicate requests | ✅ Done |
 | 1.3 | Asynchronous delivery with the outbox pattern and a background worker | ✅ Done |
 | 1.4 | Retries with exponential backoff + jitter, dead letter, manual retry | ✅ Done |
-| 1.5 | HMAC signatures, timeouts, circuit breaker | ⏳ Next |
-| 1.6 | Moving the worker to Kafka | |
+| 1.5 | HMAC signatures, per-subscriber circuit breaker | ✅ Done |
+| 1.6 | Moving the worker to Kafka | ⏳ Next |
 | 1.7 | Testcontainers, observability, load test | |
 
 ## Architecture (current)
@@ -49,11 +49,11 @@ sequenceDiagram
     participant W as Worker
     participant DB as PostgreSQL
     participant S as Subscriber
-    W->>DB: ① claim: SELECT ... FOR UPDATE SKIP LOCKED<br/>status = SENDING, next_attempt_at = now + 2 min
+    W->>DB: ① claim: SELECT ... FOR UPDATE OF d SKIP LOCKED<br/>(skips subscribers whose circuit is open)<br/>status = SENDING, next_attempt_at = now + 2 min
     Note over W,DB: COMMIT, row lock released
-    W->>S: ② HTTP POST (no transaction, no lock)
+    W->>S: ② signed HTTP POST (no transaction, no lock)
     S-->>W: 2xx / 4xx / 5xx / timeout
-    W->>DB: ③ record: SUCCEEDED, FAILED (retry later) or DEAD + attempt row
+    W->>DB: ③ record: SUCCEEDED, FAILED (retry later) or DEAD + attempt row<br/>+ update the subscriber's circuit breaker
     Note over W,DB: COMMIT
 ```
 
@@ -63,7 +63,7 @@ Several instances of the service can run side by side: `SKIP LOCKED` makes each 
 
 | Table | Holds | Example |
 |---|---|---|
-| `subscriptions` | Who wants which event types, at which URL | *Tenant `acme` wants `order.created` at `https://.../hook`* |
+| `subscriptions` | Who wants which event types, at which URL, with which signing secret; also the subscriber's circuit breaker state | *Tenant `acme` wants `order.created` at `https://.../hook`* |
 | `events` | Every event reported to the system, with its JSON payload | *Order 12345 was created* |
 | `deliveries` | One row per (event, subscription) pair, its current state and when it is due. Also serves as the outbox. | *Order 12345 → stock app: `SUCCEEDED`* |
 | `delivery_attempts` | One row per HTTP attempt: time, duration, status code, error | *Attempt 1: HTTP 500 after 175 ms* |
@@ -106,6 +106,17 @@ A failed delivery is retried with exponential backoff: 10 s × 2^(attempt − 1)
 | 5 | `DEAD`, no more automatic retries |
 
 The intervals are kept short so the whole chain can be watched in a few minutes; a production setup would spread them over hours.
+
+### Circuit breaker
+
+Each subscription has its own circuit breaker, stored in the database so that every worker instance sees the same state.
+
+| Column | Meaning |
+|---|---|
+| `consecutive_failures` | Failed attempts in a row for this subscriber; reset to 0 by any success |
+| `circuit_open_until` | `NULL` = closed (normal). Otherwise no delivery to this subscriber is claimed until this time |
+
+After 5 failures in a row the circuit opens for 1 minute. While it is open, the claim query skips that subscriber's deliveries, so no requests are sent and **no retry attempts are used up**. When the minute is over, the next claimed delivery acts as a probe: a success closes the circuit, a failure opens it for another minute.
 
 The schema is owned by Flyway migrations (`src/main/resources/db/migration`). Hibernate only validates it (`ddl-auto: validate`).
 
@@ -159,6 +170,24 @@ Every webhook is sent with these headers:
 | `Content-Type` | `application/json` |
 | `Webhook-Id` | The delivery id. Identical across all attempts of the same delivery, so receivers can drop duplicates. |
 | `Webhook-Event` | The event type, e.g. `order.created` |
+| `Webhook-Timestamp` | Unix time in seconds when this attempt was sent. New on every attempt. |
+| `Webhook-Signature` | `v1,<base64 HMAC-SHA256>`. New on every attempt. |
+
+### Verifying a webhook
+
+Requests are signed following the [Standard Webhooks](https://www.standardwebhooks.com/) layout, using the `secret` given when the subscription was created:
+
+```
+signed content = <Webhook-Id> + "." + <Webhook-Timestamp> + "." + <raw request body>
+signature      = "v1," + base64( HMAC-SHA256(secret, signed content) )
+```
+
+A receiver should:
+
+1. Compute the signature over the **raw** body bytes, before parsing the JSON. Re-serialising the JSON can change whitespace or key order and break the signature (the stored payload is `jsonb`, so it is sent as `{"orderId": 12345}`, with a space).
+2. Compare it with `Webhook-Signature` using a constant-time comparison.
+3. Reject requests whose `Webhook-Timestamp` is more than a few minutes old, to stop replayed requests.
+4. Drop duplicates by `Webhook-Id`.
 
 ## Running locally
 
@@ -256,6 +285,17 @@ At first `attempt_count` did two jobs: it was the retry budget ("how many attemp
 
 The fix was to separate the two meanings. `attempt_count` is now only the retry budget and may be reset; the attempt number comes from the number of rows already in `delivery_attempts` for that delivery, plus one. After a manual retry the history simply continues with attempts 6, 7, 8…, which is exactly what the experiment showed.
 
+### Signing webhooks with HMAC
+
+<!-- (Faz 1.5 provasında dolduracağız) İmza olmasaydı saldırgan ne yapabilirdi? Neden Webhook-Id ve zaman damgası da imzalanıyor?
+     Retry'da hangi header'lar değişiyor, neden? Alıcı tarafında doğrulama deneyi ve jsonb boşluk tuzağı. -->
+
+### Circuit breaker per subscriber, stored in the database
+
+<!-- (Faz 1.5 provasında dolduracağız) Neden abone başına? Neden hafızada değil veritabanında (iki instance, Resilience4j farkı)?
+     Sigorta atıkken deneme hakları neden yanmıyor? Deney: 36 sn boyunca FAILED:3 FAILED:3 FAILED:2 değişmedi.
+     FOR UPDATE OF d neden? -->
+
 ## Known limitations (to be addressed in the next phases)
 
 - **Every error is retried, even ones that cannot fix themselves.** A `404` (wrong URL) or `400` (payload rejected) is retried 5 times just like a `500`. Only `5xx`, `429` and timeouts should be retried; other `4xx` responses should go straight to `DEAD`.
@@ -265,4 +305,6 @@ The fix was to separate the two meanings. `attempt_count` is now only the retry 
 - **Up to 5 seconds of delivery latency.** The worker polls on a fixed delay instead of being notified of new rows. → Phase 1.6 (Kafka).
 - **Duplicate subscriptions are still possible.** Events are protected by the `Idempotency-Key` header, but creating the same subscription twice still creates two rows, so the receiver gets every notification twice.
 - **A reused key with a different body is not detected.** The stored response is returned without comparing request bodies; this should become `422 Unprocessable Entity`.
-- **Webhooks are not signed yet.** Receivers cannot verify that a request really came from this service. → Phase 1.5.
+- **Signing secrets are stored in plain text.** Anyone with read access to the database could sign fake webhooks. They should be encrypted at rest (or kept in a secret manager), and secret rotation is not supported yet.
+- **The half-open probe is a whole batch.** When a circuit's minute is over, all due deliveries of that subscriber that fit in the batch are sent at once instead of a single probe request.
+- **The failure counter can miss an increment.** Two workers recording failures for the same subscriber at the same time can both write the same value (lost update). The circuit then opens one failure later; an atomic `UPDATE ... SET consecutive_failures = consecutive_failures + 1` or `@Version` would make it exact.
