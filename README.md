@@ -11,7 +11,7 @@ This service is that "push" layer:
 1. A tenant subscribes: *"Send `order.created` events to `https://my-stock-app.com/hook`."*
 2. The marketplace reports an event: *"Order 12345 was created for this tenant."*
 3. The service finds every matching subscription and stores one delivery per subscription, then answers immediately.
-4. A background worker picks up pending deliveries and sends them.
+4. A background worker picks up pending deliveries and sends them. Failed deliveries are retried with growing delays; after 5 failed attempts a delivery is marked `DEAD` and can be retried by hand.
 5. Every attempt is logged: when it happened, how long it took, what the receiver answered.
 
 ## Status
@@ -21,8 +21,8 @@ This service is that "push" layer:
 | 1.1 | Domain model, REST API, PostgreSQL + Flyway, validation, error handling, synchronous delivery | ✅ Done |
 | 1.2 | Idempotency: rejecting duplicate requests | ✅ Done |
 | 1.3 | Asynchronous delivery with the outbox pattern and a background worker | ✅ Done |
-| 1.4 | Retries with exponential backoff + jitter, dead letter | ⏳ Next |
-| 1.5 | HMAC signatures, timeouts, circuit breaker | |
+| 1.4 | Retries with exponential backoff + jitter, dead letter, manual retry | ✅ Done |
+| 1.5 | HMAC signatures, timeouts, circuit breaker | ⏳ Next |
 | 1.6 | Moving the worker to Kafka | |
 | 1.7 | Testcontainers, observability, load test | |
 
@@ -53,7 +53,7 @@ sequenceDiagram
     Note over W,DB: COMMIT, row lock released
     W->>S: ② HTTP POST (no transaction, no lock)
     S-->>W: 2xx / 4xx / 5xx / timeout
-    W->>DB: ③ record: SUCCEEDED or FAILED + attempt row
+    W->>DB: ③ record: SUCCEEDED, FAILED (retry later) or DEAD + attempt row
     Note over W,DB: COMMIT
 ```
 
@@ -75,9 +75,11 @@ stateDiagram-v2
     [*] --> PENDING: event reported
     PENDING --> SENDING: worker claims it
     SENDING --> SUCCEEDED: 2xx
-    SENDING --> FAILED: 4xx / 5xx / timeout
+    SENDING --> FAILED: error, attempts left
+    SENDING --> DEAD: error, 5th attempt
     SENDING --> SENDING: lease expired,<br/>another worker reclaims it
-    FAILED --> [*]: retries in Phase 1.4
+    FAILED --> SENDING: retry time reached
+    DEAD --> PENDING: POST /deliveries/{id}/retry
     SUCCEEDED --> [*]
 ```
 
@@ -88,7 +90,22 @@ stateDiagram-v2
 | `PENDING` | Creation time: due immediately |
 | `SENDING` | End of the 2-minute lease. If the worker dies before recording a result, the row becomes due again after that. |
 | `SUCCEEDED` | `NULL`: there is no next attempt |
-| `FAILED` | Unchanged for now; will hold the next retry time in Phase 1.4 |
+| `FAILED` | Time of the next retry (see the retry schedule below) |
+| `DEAD` | `NULL`: automatic retries are over |
+
+### Retry schedule
+
+A failed delivery is retried with exponential backoff: 10 s × 2^(attempt − 1), multiplied by a random factor between 0.8 and 1.2 (jitter). After the 5th failed attempt the delivery becomes `DEAD`.
+
+| Failed attempt | Next retry after |
+|---|---|
+| 1 | ~10 s (8–12 s) |
+| 2 | ~20 s (16–24 s) |
+| 3 | ~40 s (32–48 s) |
+| 4 | ~80 s (64–96 s) |
+| 5 | `DEAD`, no more automatic retries |
+
+The intervals are kept short so the whole chain can be watched in a few minutes; a production setup would spread them over hours.
 
 The schema is owned by Flyway migrations (`src/main/resources/db/migration`). Hibernate only validates it (`ddl-auto: validate`).
 
@@ -100,6 +117,7 @@ The schema is owned by Flyway migrations (`src/main/resources/db/migration`). Hi
 | `GET` | `/subscriptions/{id}` | Read a subscription (the secret is never returned) | `200` |
 | `POST` | `/events` | Report an event. Deliveries are stored for every matching subscription and sent asynchronously by the worker. Requires an `Idempotency-Key` header. | `202` |
 | `GET` | `/deliveries?eventId=...` | List the deliveries of an event and their states | `200` |
+| `POST` | `/deliveries/{id}/retry` | Put a `DEAD` delivery back in the queue with a fresh set of 5 attempts. `404` if it does not exist, `409` if it is not `DEAD`. | `202` |
 
 Errors follow [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457). Validation errors include a per-field `errors` list.
 
@@ -129,6 +147,9 @@ curl -i -X POST http://localhost:8080/events \
 
 # 3. Check its deliveries a few seconds later (use the id returned in step 2)
 curl -i "http://localhost:8080/deliveries?eventId=<EVENT_ID>"
+
+# 4. If a delivery ended up DEAD (e.g. the receiver was down), send it again once the receiver is fixed
+curl -i -X POST "http://localhost:8080/deliveries/<DELIVERY_ID>/retry"
 ```
 
 Every webhook is sent with these headers:
@@ -215,10 +236,30 @@ When a worker claims a delivery it sets the status to `SENDING` and writes the e
 
 The lease is sized for the whole batch, not a single request: deliveries in a batch are sent one after another, so the worst case is 10 × 7 s (2 s connect + 5 s read timeout) = 70 s. A shorter lease would let another worker reclaim deliveries that are still waiting their turn and send them twice.
 
+### Retries: exponential backoff with jitter
+
+A failed delivery is not retried at a fixed interval but with growing delays (10 s, 20 s, 40 s, 80 s). If a subscriber is down, hammering it with requests makes it harder for it to recover; short outages are still caught by the first retries, while long ones get more and more breathing room.
+
+Each delay is multiplied by a random factor between 0.8 and 1.2 (jitter). Without it, if 1,000 deliveries failed at the same moment because a subscriber went down, all 1,000 would be retried in the same second and could knock the recovering server over again (thundering herd).
+
+I tested it with a subscriber that always answers `500`: the delivery was attempted 5 times, 17 s, 21 s, 48 s and 72 s apart, and then became `DEAD`. All 5 attempts are visible in `delivery_attempts`.
+
+### Dead letter and manual retry
+
+Retrying forever makes no sense when the problem is permanent, for example a wrong URL. After the 5th failed attempt the delivery becomes `DEAD`, which means "automatic retries are over, a human has to look at this". The row and all its attempts stay in the database, so the reason is easy to find.
+
+Once the tenant has fixed the problem, `POST /deliveries/{id}/retry` puts the delivery back in the queue with a fresh set of 5 attempts. Only `DEAD` deliveries are accepted (`409 Conflict` otherwise): requeueing a `SUCCEEDED` delivery would make the receiver get the same event twice, and requeueing a `SENDING` one could let two workers send it at the same time. The endpoint answers `202 Accepted`, not `200`, because the delivery has only been queued; the worker sends it a few seconds later.
+
+### Retry budget vs. attempt number
+
+At first `attempt_count` did two jobs: it was the retry budget ("how many attempts are left?") and it was also used as the attempt number written to `delivery_attempts`. Adding manual retry exposed the problem. `requeue()` resets the counter to 0, so the next failed attempt would have been recorded as attempt number 1 again, which already existed. The `unique (delivery_id, attempt_number)` constraint would reject it, the result would never be recorded, the delivery would stay in `SENDING`, and every time the lease expired it would be sent again: an endless loop hitting the subscriber every 2 minutes.
+
+The fix was to separate the two meanings. `attempt_count` is now only the retry budget and may be reset; the attempt number comes from the number of rows already in `delivery_attempts` for that delivery, plus one. After a manual retry the history simply continues with attempts 6, 7, 8…, which is exactly what the experiment showed.
+
 ## Known limitations (to be addressed in the next phases)
 
-- **Failed deliveries are never retried.** A failed delivery stays `FAILED`; `next_attempt_at` is not yet set to a retry time. → Phase 1.4 (exponential backoff + dead letter).
-- **One broken delivery stops the rest of the batch.** If recording the result of one delivery throws, the worker stops that run and the remaining claimed deliveries wait in `SENDING` until their lease expires. Each delivery should be handled in its own `try/catch`. → Phase 1.4.
+- **Every error is retried, even ones that cannot fix themselves.** A `404` (wrong URL) or `400` (payload rejected) is retried 5 times just like a `500`. Only `5xx`, `429` and timeouts should be retried; other `4xx` responses should go straight to `DEAD`.
+- **Nobody is told when a delivery dies.** `DEAD` deliveries can be found by querying and retried by hand, but there is no alert or listing endpoint for the tenant.
 - **A delivery can be sent twice after a lease expires.** If a send takes longer than the 2-minute lease, another worker may reclaim and resend it; the late result is then recorded as an extra attempt. This is accepted under at-least-once delivery (receivers deduplicate by `Webhook-Id`); a fencing token on the claim would prevent the stale write.
 - **N+1 when claiming.** The claim query is native (it needs `FOR UPDATE SKIP LOCKED`), so `@EntityGraph` cannot be used and each claimed delivery loads its subscription separately. Bounded by the batch size of 10; `hibernate.default_batch_fetch_size` would fold these into one `IN (...)` query.
 - **Up to 5 seconds of delivery latency.** The worker polls on a fixed delay instead of being notified of new rows. → Phase 1.6 (Kafka).
