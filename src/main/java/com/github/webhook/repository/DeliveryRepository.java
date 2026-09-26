@@ -16,13 +16,15 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
     long countByEventId(UUID eventId);
 
     @Query(value = """
-        SELECT *
-        FROM deliveries 
-        WHERE status IN('PENDING','SENDING','FAILED')
-        AND next_attempt_at <= now()
-        ORDER BY next_attempt_at 
+        SELECT d.*
+        FROM deliveries d
+        JOIN subscriptions s ON s.id = d.subscription_id
+        WHERE d.status IN ('PENDING', 'SENDING', 'FAILED')
+          AND d.next_attempt_at <= now()
+          AND (s.circuit_open_until IS NULL OR s.circuit_open_until <= now())
+        ORDER BY d.next_attempt_at
         LIMIT :batchSize
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF d SKIP LOCKED
         """, nativeQuery = true)
     List<Delivery> findDue(@Param("batchSize") int batchSize);
 }

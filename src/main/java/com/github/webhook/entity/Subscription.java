@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +38,22 @@ public class Subscription {
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
+    @Column(nullable = false)
+    private int consecutiveFailures;
+
+    private Instant circuitOpenUntil;
+
+    public void recordSuccess() {
+        this.consecutiveFailures = 0;
+        this.circuitOpenUntil = null;
+    }
+
+    public void recordFailure(int threshold, Duration openFor) {
+        this.consecutiveFailures ++;
+        if(consecutiveFailures >= threshold)
+            this.circuitOpenUntil = Instant.now().plus(openFor);
+    }
+
     protected Subscription() {
         // JPA icin
     }
@@ -53,6 +70,8 @@ public class Subscription {
         this.createdAt = Instant.now();
     }
 
+    public int getConsecutiveFailures() { return consecutiveFailures; }
+    public Instant getCircuitOpenUntil() { return circuitOpenUntil; }
     public UUID getId() { return id; }
     public String getTenantId() { return tenantId; }
     public String getUrl() { return url; }

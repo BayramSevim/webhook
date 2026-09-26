@@ -3,6 +3,7 @@ package com.github.webhook.service;
 
 import com.github.webhook.entity.Delivery;
 import com.github.webhook.entity.DeliveryAttempt;
+import com.github.webhook.entity.Subscription;
 import com.github.webhook.repository.DeliveryAttemptRepository;
 import com.github.webhook.repository.DeliveryRepository;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,9 @@ public class DeliveryStateService {
     private final DeliveryRepository deliveryRepository;
     private final DeliveryAttemptRepository deliveryAttemptRepository;
     private final BackoffPolicy backoffPolicy;
+
+    private static final int CIRCUIT_THRESHOLD = 5;
+    private static final Duration CIRCUIT_OPEN_FOR = Duration.ofMinutes(1);
 
     public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy) {
         this.deliveryRepository = deliveryRepository;
@@ -51,10 +55,15 @@ public class DeliveryStateService {
         Delivery delivery = deliveryRepository.findById(deliveryId)
                 .orElseThrow(() -> new IllegalStateException("Delivery Not Found: " + deliveryId));
 
-        if (result.succeeded())
+        Subscription subscription = delivery.getSubscription();
+
+        if (result.succeeded()){
             delivery.markSucceeded();
+            subscription.recordSuccess();
+        }
         else {
             int attemptsAfterThis = delivery.getAttemptCount() + 1;
+            subscription.recordFailure(CIRCUIT_THRESHOLD,CIRCUIT_OPEN_FOR);
             if (backoffPolicy.shouldGiveUp(attemptsAfterThis))
                 delivery.markDead();
             else {
