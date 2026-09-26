@@ -1,7 +1,9 @@
 package com.github.webhook.service;
 
 import com.github.webhook.dto.response.DeliveryResponse;
+import com.github.webhook.entity.Delivery;
 import com.github.webhook.entity.Event;
+import com.github.webhook.exception.DeliveryNotFoundException;
 import com.github.webhook.exception.EventNotFoundException;
 import com.github.webhook.repository.DeliveryRepository;
 import com.github.webhook.repository.EventRepository;
@@ -30,5 +32,22 @@ public class DeliveryService {
         return deliveryRepository.findByEventId(eventId).stream()
                 .map(DeliveryResponse::from)
                 .toList();
+    }
+
+    @Transactional
+    public DeliveryResponse retry(UUID deliveryId) {
+        Delivery delivery =  deliveryRepository.findById(deliveryId)
+                .orElseThrow(()-> new DeliveryNotFoundException(deliveryId));
+        delivery.requeue();
+        return new DeliveryResponse(
+                deliveryId,
+                delivery.getSubscription().getId(),
+                delivery.getSubscription().getUrl(),
+                delivery.getStatus(),
+                delivery.getAttemptCount(),
+                delivery.getNextAttemptAt(),
+                delivery.getCreatedAt(),
+                delivery.getUpdatedAt()
+                );
     }
 }

@@ -58,6 +58,17 @@ public class GlobalExceptionHandler {
         log.error("Unexpected data integrity violation", ex);
         return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected error");
     }
+
+    @ExceptionHandler(DeliveryNotFoundException.class)
+    public ProblemDetail handleDeliveryNotFound(DeliveryNotFoundException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(IllegalStateException.class)
+    public ProblemDetail handleIllegalState(IllegalStateException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
     public record FieldErrorResponse(String field, String message) {
     }
 }

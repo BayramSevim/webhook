@@ -82,6 +82,15 @@ public class Delivery {
         this.nextAttemptAt = null;
     }
 
+    public void requeue() {
+        if (this.status != DeliveryStatus.DEAD) {
+            throw new IllegalStateException("Only DEAD deliveries can be retried");
+        }
+        this.status = DeliveryStatus.PENDING;
+        this.attemptCount = 0;
+        this.nextAttemptAt = Instant.now();
+    }
+
 
     public UUID getId() { return id; }
     public Event getEvent() { return event; }

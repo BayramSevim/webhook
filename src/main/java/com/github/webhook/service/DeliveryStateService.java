@@ -62,12 +62,12 @@ public class DeliveryStateService {
             }
         }
 
+        int attemptNumber = (int) deliveryAttemptRepository.countByDeliveryId(deliveryId) + 1;
 
         deliveryAttemptRepository.save(new
-
                 DeliveryAttempt(
                 delivery,
-                delivery.getAttemptCount(),
+                attemptNumber,
                 result.attemptedAt(),
                 result.durationMs(),
                 result.responseStatus(),
