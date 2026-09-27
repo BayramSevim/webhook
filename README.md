@@ -1,6 +1,6 @@
 # Webhook Delivery Service
 
-[![CI](https://github.com/BayramSevim/webhook-delivery-service/actions/workflows/ci.yml/badge.svg)](https://github.com/BayramSevim/webhook-delivery-service/actions/workflows/ci.yml)
+[![CI](https://github.com/BayramSevim/webhook/actions/workflows/ci.yml/badge.svg)](https://github.com/BayramSevim/webhook/actions/workflows/ci.yml)
 
 A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background, signs every request and keeps a full audit trail of every attempt.
 
