@@ -1,5 +1,7 @@
 # Webhook Delivery Service
 
+[![CI](https://github.com/BayramSevim/webhook-delivery-service/actions/workflows/ci.yml/badge.svg)](https://github.com/BayramSevim/webhook-delivery-service/actions/workflows/ci.yml)
+
 A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background, signs every request and keeps a full audit trail of every attempt.
 
 ## What problem does it solve?
@@ -24,7 +26,8 @@ This service is that "push" layer:
 | 1.4 | Retries with exponential backoff + jitter, dead letter, manual retry | ✅ Done |
 | 1.5 | HMAC signatures, per-subscriber circuit breaker | ✅ Done |
 | 1.6 | Kafka dispatch mode: outbox relay, idempotent consumer, switchable by config | ✅ Done |
-| 1.7 | Docker image, Testcontainers, CI, observability, load test | ⏳ Next |
+| 1.7 | Multi-stage Docker image, one-command `docker compose` setup, unit + Testcontainers tests, GitHub Actions CI | ✅ Done |
+| 1.8 | Load test (database vs Kafka mode), graceful shutdown, metrics | ⏳ Next |
 
 ## Architecture (current)
 
@@ -213,14 +216,24 @@ A receiver should:
 
 ## Running locally
 
-Requirements: Java 21, Docker.
+Requirements: Docker. (Java 21 only if you want to run the app outside Docker.)
+
+**Everything in Docker, one command:**
 
 ```bash
-docker compose up -d        # PostgreSQL 17 on localhost:5433, Kafka on localhost:9092
-./mvnw spring-boot:run      # app on localhost:8080, Flyway migrates on startup
+docker compose --profile app up -d --build
 ```
 
-The app starts in database polling mode. To use Kafka instead, set `webhook.dispatch: kafka` in `application.yaml` (or start with `--webhook.dispatch=kafka`). The `webhook.deliveries` topic is created on startup with 3 partitions.
+This starts PostgreSQL 17 (`localhost:5433`), Kafka (`localhost:9092`, data kept in a volume) and the app (`localhost:8080`, Kafka mode). The app waits until the database and Kafka report healthy.
+
+**For development** (app from the IDE, infrastructure in Docker):
+
+```bash
+docker compose up -d        # PostgreSQL + Kafka only
+./mvnw spring-boot:run      # app on localhost:8080, database polling mode by default
+```
+
+To use Kafka mode from the IDE, set `webhook.dispatch: kafka` in `application.yaml` (or start with `--webhook.dispatch=kafka`). The `webhook.deliveries` topic is created on startup with 3 partitions; automatic topic creation is disabled on the broker.
 
 Health check: `GET http://localhost:8080/actuator/health`
 
@@ -229,6 +242,22 @@ To see several workers sharing the same queue, start a second instance on anothe
 ```bash
 ./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=8081
 ```
+
+## Tests
+
+```bash
+./mvnw verify               # needs Docker for Testcontainers
+```
+
+| Test | What it checks |
+|---|---|
+| `BackoffPolicyTest` | Give-up rule, doubling delays and jitter (the random tests run 50 times each) |
+| `WebhookSignerTest` | A fixed signature computed independently with Python's `hmac`, plus: timestamp, secret and even whitespace in the body change the signature |
+| `DeliveryFlowIntegrationTest` | The whole flow against a real PostgreSQL started by **Testcontainers**: subscribe → report an event → worker → HTTP → `SUCCEEDED`. A small in-process HTTP server plays the subscriber and the test verifies the received signature exactly like a receiver would. Also checks idempotent event reporting. |
+
+The integration test never touches the development database: every run gets a fresh, empty PostgreSQL container. (An early version accidentally connected to the local database, where the app running in Docker claimed the test's delivery first and tried to send it to its own `localhost`. That is exactly why tests need their own database.)
+
+Every push runs `./mvnw verify` and builds the Docker image on GitHub Actions.
 
 ## Design decisions
 
@@ -367,7 +396,6 @@ A fast subscriber whose own two requests took about half a second in total finis
 - **Delivery still starts with polling.** The database worker polls every 5 seconds and the Kafka relay every second, instead of being notified of new rows. Change data capture (e.g. Debezium reading the PostgreSQL WAL) would remove the polling, at the cost of another component to run.
 - **Republishing never ends if no consumer is running.** Only `recordResult` increases the attempt counter, so a delivery whose Kafka messages are never processed is republished every 2 minutes and never becomes `DEAD`. A publish counter or an alert on consumer lag would catch this.
 - **Slow subscribers delay others in the same partition** (head-of-line blocking, see above).
-- **Kafka data does not survive re-creating the container.** `docker-compose.yml` has no volume for Kafka yet. → Phase 1.7.
 - **Duplicate subscriptions are still possible.** Events are protected by the `Idempotency-Key` header, but creating the same subscription twice still creates two rows, so the receiver gets every notification twice.
 - **A reused key with a different body is not detected.** The stored response is returned without comparing request bodies; this should become `422 Unprocessable Entity`.
 - **Signing secrets are stored in plain text.** Anyone with read access to the database could sign fake webhooks. They should be encrypted at rest (or kept in a secret manager), and secret rotation is not supported yet.
