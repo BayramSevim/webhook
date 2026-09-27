@@ -23,8 +23,8 @@ This service is that "push" layer:
 | 1.3 | Asynchronous delivery with the outbox pattern and a background worker | ✅ Done |
 | 1.4 | Retries with exponential backoff + jitter, dead letter, manual retry | ✅ Done |
 | 1.5 | HMAC signatures, per-subscriber circuit breaker | ✅ Done |
-| 1.6 | Moving the worker to Kafka | ⏳ Next |
-| 1.7 | Testcontainers, observability, load test | |
+| 1.6 | Kafka dispatch mode: outbox relay, idempotent consumer, switchable by config | ✅ Done |
+| 1.7 | Docker image, Testcontainers, CI, observability, load test | ⏳ Next |
 
 ## Architecture (current)
 
@@ -58,6 +58,28 @@ sequenceDiagram
 ```
 
 Several instances of the service can run side by side: `SKIP LOCKED` makes each worker skip rows another worker is claiming, and the `SENDING` status keeps claimed rows out of everyone else's query after the lock is released.
+
+### Dispatch modes: database polling or Kafka
+
+How deliveries reach the sender is chosen with one setting, `webhook.dispatch` (`db` by default, or `kafka`). The API, the database and the sending logic are the same in both modes; only the trigger changes.
+
+| Mode | Who finds due deliveries | Who sends them |
+|---|---|---|
+| `db` | `DeliveryWorker`, every 5 s | the same worker, one after another |
+| `kafka` | `OutboxRelay`, every 1 s, publishes them to Kafka | `KafkaDeliveryListener`, 3 consumers in the `delivery-workers` group |
+
+```mermaid
+flowchart LR
+    API[REST API] -->|event + deliveries<br/>in one transaction| DB[(PostgreSQL<br/>outbox)]
+    R[Outbox relay<br/>every 1 s] -->|① claim due rows<br/>SKIP LOCKED, SENDING + lease| DB
+    R -->|② key = subscriptionId<br/>value = deliveryId| K[[Kafka topic<br/>webhook.deliveries<br/>3 partitions]]
+    K --> L[Listener × 3<br/>group delivery-workers]
+    L -->|③ load delivery,<br/>skip if not SENDING| DB
+    L -->|④ signed HTTP POST| S[Subscriber endpoint]
+    L -->|⑤ record result| DB
+```
+
+In both modes a single `DeliveryProcessor` does the actual work for one delivery: send it, then record the result.
 
 ## Data model
 
@@ -194,9 +216,11 @@ A receiver should:
 Requirements: Java 21, Docker.
 
 ```bash
-docker compose up -d        # PostgreSQL 17 on localhost:5433
+docker compose up -d        # PostgreSQL 17 on localhost:5433, Kafka on localhost:9092
 ./mvnw spring-boot:run      # app on localhost:8080, Flyway migrates on startup
 ```
+
+The app starts in database polling mode. To use Kafka instead, set `webhook.dispatch: kafka` in `application.yaml` (or start with `--webhook.dispatch=kafka`). The `webhook.deliveries` topic is created on startup with 3 partitions.
 
 Health check: `GET http://localhost:8080/actuator/health`
 
@@ -296,13 +320,54 @@ The fix was to separate the two meanings. `attempt_count` is now only the retry 
      Sigorta atıkken deneme hakları neden yanmıyor? Deney: 36 sn boyunca FAILED:3 FAILED:3 FAILED:2 değişmedi.
      FOR UPDATE OF d neden? -->
 
+### Kafka mode: one processor, two triggers, no dispatcher interface
+
+My first plan was a `DeliveryDispatcher` interface with a database and a Kafka implementation. But an interface only helps when some code calls it, and nothing would call this one: the database worker is started by Spring's scheduler and the Kafka listener by Spring Kafka. What the two modes really share is the work for a single delivery (send it, record the result), so that went into one `DeliveryProcessor` class. The worker and the listener only decide *where* deliveries come from, and `@ConditionalOnProperty(name = "webhook.dispatch")` creates only the beans of the chosen mode. No existing code was deleted to add Kafka.
+
+The processor catches every exception itself. If an exception escaped the Kafka listener, Spring Kafka would retry the same message on its own, a second retry mechanism next to the database-driven backoff. Retries stay in one place: `recordResult` and `BackoffPolicy`.
+
+### Outbox relay: claim first, publish second
+
+Writing to the database and publishing to Kafka cannot happen in one transaction (the dual write problem), so the order matters. The relay first claims due deliveries exactly like the database worker does (`SENDING` + a 2-minute lease, committed), and only then publishes them with `kafkaTemplate.send(...).join()`. `join()` waits for the broker's acknowledgement, so a failed publish is noticed.
+
+If the publish fails, or the message is published but never processed, the lease expires and the relay publishes the delivery again. In the reverse order (publish, then write to the database) a crash in between would leave a message in Kafka that the database knows nothing about. No new column or status was needed: the existing claim and lease mechanism already gives at-least-once publishing.
+
+I saw the lease at work while the consumer did not exist yet: the relay republished the same delivery every 2 minutes, and 20 copies piled up on the topic in 40 minutes.
+
+### Claim check: only the delivery id goes to Kafka
+
+The message value is just the delivery id; the payload, URL and signing secret stay in PostgreSQL and the consumer loads them by id. The database stays the single source of truth (a copy on the topic cannot go stale), signing secrets never leave the database, and messages stay tiny no matter how large the payload is.
+
+### Partition key: the subscription id
+
+Every delivery of a subscriber has the same key, so it lands in the same partition, and a partition is read by exactly one consumer of the group, one message at a time. This keeps one subscriber's deliveries in order, and it also means two copies of the same delivery are never processed at the same time: the second copy waits until the first one has finished.
+
+### Idempotent consumer: 20 messages, 1 HTTP request
+
+Kafka and the lease both give at-least-once delivery, so the consumer must expect duplicates. Before sending, it loads the delivery and skips it unless it is still `SENDING`. When the consumer was started with those 20 copies waiting on the topic, the subscriber received exactly **one** request: the first copy sent it and recorded `SUCCEEDED`, the other 19 were skipped.
+
+### Head-of-line blocking
+
+Because a partition is processed one message at a time, a slow subscriber also delays every other subscriber that happens to share its partition. I measured it with one subscriber that takes 4 seconds to answer and several fast ones:
+
+| Partition | Slow subscriber? | Last delivery finished |
+|---|---|---|
+| 1 | no | 14:28:44 |
+| 0 | yes | 14:28:49 |
+| 2 | yes | 14:28:50 |
+
+A fast subscriber whose own two requests took about half a second in total finished 6 seconds after the partition without a slow subscriber, because it waited behind the slow one twice. The 5-second read timeout limits how long one request can hold a partition, and the circuit breaker removes subscribers that keep failing, but a subscriber that is slow and still answers `200` is not caught by either. More partitions reduce the chance of sharing one; a separate topic for known slow subscribers, or processing different keys of a partition in parallel, would remove it. The database mode has the same effect inside a batch, since the worker sends the 10 claimed deliveries one after another.
+
 ## Known limitations (to be addressed in the next phases)
 
 - **Every error is retried, even ones that cannot fix themselves.** A `404` (wrong URL) or `400` (payload rejected) is retried 5 times just like a `500`. Only `5xx`, `429` and timeouts should be retried; other `4xx` responses should go straight to `DEAD`.
 - **Nobody is told when a delivery dies.** `DEAD` deliveries can be found by querying and retried by hand, but there is no alert or listing endpoint for the tenant.
 - **A delivery can be sent twice after a lease expires.** If a send takes longer than the 2-minute lease, another worker may reclaim and resend it; the late result is then recorded as an extra attempt. This is accepted under at-least-once delivery (receivers deduplicate by `Webhook-Id`); a fencing token on the claim would prevent the stale write.
 - **N+1 when claiming.** The claim query is native (it needs `FOR UPDATE SKIP LOCKED`), so `@EntityGraph` cannot be used and each claimed delivery loads its subscription separately. Bounded by the batch size of 10; `hibernate.default_batch_fetch_size` would fold these into one `IN (...)` query.
-- **Up to 5 seconds of delivery latency.** The worker polls on a fixed delay instead of being notified of new rows. → Phase 1.6 (Kafka).
+- **Delivery still starts with polling.** The database worker polls every 5 seconds and the Kafka relay every second, instead of being notified of new rows. Change data capture (e.g. Debezium reading the PostgreSQL WAL) would remove the polling, at the cost of another component to run.
+- **Republishing never ends if no consumer is running.** Only `recordResult` increases the attempt counter, so a delivery whose Kafka messages are never processed is republished every 2 minutes and never becomes `DEAD`. A publish counter or an alert on consumer lag would catch this.
+- **Slow subscribers delay others in the same partition** (head-of-line blocking, see above).
+- **Kafka data does not survive re-creating the container.** `docker-compose.yml` has no volume for Kafka yet. → Phase 1.7.
 - **Duplicate subscriptions are still possible.** Events are protected by the `Idempotency-Key` header, but creating the same subscription twice still creates two rows, so the receiver gets every notification twice.
 - **A reused key with a different body is not detected.** The stored response is returned without comparing request bodies; this should become `422 Unprocessable Entity`.
 - **Signing secrets are stored in plain text.** Anyone with read access to the database could sign fake webhooks. They should be encrypted at rest (or kept in a secret manager), and secret rotation is not supported yet.
