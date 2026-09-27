@@ -10,9 +10,11 @@ spring:
       ddl-auto: validate
   Kafka:
     bootstrap-servers: localhost:9092
+    consumer:
+      auto-offset-reset: earliest
 
 webhook:
-  dispatch: db
+  dispatch: kafka
 
 logging:
   level:

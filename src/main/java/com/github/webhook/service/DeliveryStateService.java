@@ -3,6 +3,7 @@ package com.github.webhook.service;
 
 import com.github.webhook.entity.Delivery;
 import com.github.webhook.entity.DeliveryAttempt;
+import com.github.webhook.entity.DeliveryStatus;
 import com.github.webhook.entity.Subscription;
 import com.github.webhook.repository.DeliveryAttemptRepository;
 import com.github.webhook.repository.DeliveryRepository;
@@ -42,6 +43,7 @@ public class DeliveryStateService {
                     delivery.markSending(Instant.now().plus(LEASE));
                     return new DeliveryJob(
                             delivery.getId(),
+                            delivery.getSubscription().getId(),
                             delivery.getSubscription().getUrl(),
                             delivery.getSubscription().getSecret(),
                             delivery.getEvent().getEventType(),
@@ -83,5 +85,19 @@ public class DeliveryStateService {
                 result.responseStatus(),
                 result.errorMessage()
         ));
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<DeliveryJob> loadJob(UUID deliveryId) {
+        return deliveryRepository.findById(deliveryId)
+                .filter(delivery -> delivery.getStatus() == DeliveryStatus.SENDING)
+                .map(delivery -> new DeliveryJob(
+                        delivery.getId(),
+                        delivery.getSubscription().getId(),
+                        delivery.getSubscription().getUrl(),
+                        delivery.getSubscription().getSecret(),
+                        delivery.getEvent().getEventType(),
+                        delivery.getEvent().getPayload()
+                ));
     }
 }

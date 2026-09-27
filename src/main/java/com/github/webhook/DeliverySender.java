@@ -35,7 +35,7 @@ public class DeliverySender {
                 job.secret(),
                 job.deliveryId().toString(),
                 timestamp,
-                job.payload()
+                job.payload().toString()
         );
 
         try {
