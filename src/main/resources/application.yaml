@@ -12,6 +12,16 @@ spring:
     bootstrap-servers: localhost:9092
     consumer:
       auto-offset-reset: earliest
+  lifecycle:
+    timeout-per-shutdown-phase: 80s
+    task:
+      scheduling:
+        shutdown:
+          await-termination: true
+          await-termination-period: 80s
+
+server:
+  shutdown: graceful
 
 webhook:
   dispatch: kafka

@@ -52,6 +52,7 @@ services:
 
   app:
     container_name: webhook-app
+    stop_grace_period: 90s
     build: .
     depends_on:
       db:
@@ -63,7 +64,7 @@ services:
       DB_USERNAME: postgres
       DB_PASSWORD: "123456"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      WEBHOOK_DISPATCH: kafka
+      WEBHOOK_DISPATCH: ${WEBHOOK_DISPATCH:-kafka}
     ports:
       - "8080:8080"
     profiles: ["app"]
