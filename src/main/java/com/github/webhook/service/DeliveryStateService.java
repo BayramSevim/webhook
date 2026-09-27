@@ -8,6 +8,7 @@ import com.github.webhook.entity.Subscription;
 import com.github.webhook.mapper.DeliveryMapper;
 import com.github.webhook.repository.DeliveryAttemptRepository;
 import com.github.webhook.repository.DeliveryRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,15 +28,17 @@ public class DeliveryStateService {
     private final DeliveryAttemptRepository deliveryAttemptRepository;
     private final BackoffPolicy backoffPolicy;
     private final DeliveryMapper deliveryMapper;
+    private final MeterRegistry meterRegistry;
 
     private static final int CIRCUIT_THRESHOLD = 5;
     private static final Duration CIRCUIT_OPEN_FOR = Duration.ofMinutes(1);
 
-    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy, DeliveryMapper deliveryMapper) {
+    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy, DeliveryMapper deliveryMapper, MeterRegistry meterRegistry) {
         this.deliveryRepository = deliveryRepository;
         this.deliveryAttemptRepository = deliveryAttemptRepository;
         this.backoffPolicy = backoffPolicy;
         this.deliveryMapper = deliveryMapper;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional
@@ -55,20 +58,26 @@ public class DeliveryStateService {
 
         Subscription subscription = delivery.getSubscription();
 
-        if (result.succeeded()){
+        String outcome;
+        if (result.succeeded()) {
             delivery.markSucceeded();
             subscription.recordSuccess();
-        }
-        else {
+            outcome = "succeeded";
+        } else {
             int attemptsAfterThis = delivery.getAttemptCount() + 1;
-            subscription.recordFailure(CIRCUIT_THRESHOLD,CIRCUIT_OPEN_FOR);
-            if (backoffPolicy.shouldGiveUp(attemptsAfterThis))
+            subscription.recordFailure(CIRCUIT_THRESHOLD, CIRCUIT_OPEN_FOR);
+            if (backoffPolicy.shouldGiveUp(attemptsAfterThis)) {
                 delivery.markDead();
-            else {
-                Instant next = Instant.now().plus(backoffPolicy.delayAfter(attemptsAfterThis));
-                delivery.markFailed(next);
+                outcome = "dead";
+            } else {
+                delivery.markFailed(Instant.now().plus(backoffPolicy.delayAfter(attemptsAfterThis)));
+                outcome = "failed";
             }
         }
+
+        meterRegistry.counter("webhook.deliveries", "outcome", outcome).increment();
+        meterRegistry.timer("webhook.delivery.duration", "outcome", outcome)
+                .record(Duration.ofMillis(result.durationMs()));
 
         int attemptNumber = (int) deliveryAttemptRepository.countByDeliveryId(deliveryId) + 1;
 

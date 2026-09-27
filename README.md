@@ -26,8 +26,9 @@ This service is that "push" layer:
 | 1.4 | Retries with exponential backoff + jitter, dead letter, manual retry | ✅ Done |
 | 1.5 | HMAC signatures, per-subscriber circuit breaker | ✅ Done |
 | 1.6 | Kafka dispatch mode: outbox relay, idempotent consumer, switchable by config | ✅ Done |
-| 1.7 | Multi-stage Docker image, one-command `docker compose` setup, unit + Testcontainers tests, GitHub Actions CI | ✅ Done |
-| 1.8 | Load test (database vs Kafka mode), graceful shutdown, metrics | ⏳ Next |
+| 1.7 | Multi-stage Docker image, one-command `docker compose` setup, unit + Testcontainers tests, GitHub Actions CI, graceful shutdown | ✅ Done |
+| 1.8 | Metrics with Micrometer, Prometheus and a provisioned Grafana dashboard | ✅ Done |
+| Next | Load test (database vs Kafka mode) | Planned |
 
 ## Architecture (current)
 
@@ -224,7 +225,7 @@ Requirements: Docker. (Java 21 only if you want to run the app outside Docker.)
 docker compose --profile app up -d --build
 ```
 
-This starts PostgreSQL 17 (`localhost:5433`), Kafka (`localhost:9092`, data kept in a volume) and the app (`localhost:8080`, Kafka mode). The app waits until the database and Kafka report healthy.
+This starts PostgreSQL 17 (`localhost:5433`), Kafka (`localhost:9092`, data kept in a volume), the app (`localhost:8080`, Kafka mode), Prometheus (`localhost:9090`) and Grafana (`localhost:3000`). The app waits until the database and Kafka report healthy. To run the containerised app in database polling mode instead, set `WEBHOOK_DISPATCH=db` in the environment before `docker compose up`.
 
 **For development** (app from the IDE, infrastructure in Docker):
 
@@ -258,6 +259,22 @@ To see several workers sharing the same queue, start a second instance on anothe
 The integration test never touches the development database: every run gets a fresh, empty PostgreSQL container. (An early version accidentally connected to the local database, where the app running in Docker claimed the test's delivery first and tried to send it to its own `localhost`. That is exactly why tests need their own database.)
 
 Every push runs `./mvnw verify` and builds the Docker image on GitHub Actions.
+
+## Observability
+
+The app exposes metrics at `/actuator/prometheus` (Micrometer). Prometheus scrapes them every 5 seconds, and Grafana starts with the data source and a **Webhook Delivery Service** dashboard already provisioned: open `http://localhost:3000` → Dashboards → Webhook.
+
+![Grafana dashboard](docs/grafana-dashboard.png)
+
+Besides the built-in JVM, HTTP and connection pool metrics, three metrics describe the delivery pipeline itself:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `webhook_deliveries_total{outcome}` | counter | Recorded attempts by result: `succeeded`, `failed`, `dead` |
+| `webhook_delivery_duration_seconds` | timer (histogram) | How long an attempt took, used for the p50 / p95 / p99 panels |
+| `webhook_deliveries_backlog` | gauge | Deliveries that are `PENDING`, `FAILED` or `SENDING`, i.e. work the system still owes |
+
+The backlog is the number to alert on: if it keeps growing, deliveries are coming in faster than they go out. It was also the first thing the dashboard showed: with two subscribers taking 4 to 5 seconds each, 100 deliveries drained at well under one per second, the head-of-line blocking described above, visible as a slowly falling backlog line and a p95 of about 5 seconds.
 
 ## Design decisions
 
@@ -386,6 +403,14 @@ Because a partition is processed one message at a time, a slow subscriber also d
 | 2 | yes | 14:28:50 |
 
 A fast subscriber whose own two requests took about half a second in total finished 6 seconds after the partition without a slow subscriber, because it waited behind the slow one twice. The 5-second read timeout limits how long one request can hold a partition, and the circuit breaker removes subscribers that keep failing, but a subscriber that is slow and still answers `200` is not caught by either. More partitions reduce the chance of sharing one; a separate topic for known slow subscribers, or processing different keys of a partition in parallel, would remove it. The database mode has the same effect inside a batch, since the worker sends the 10 claimed deliveries one after another.
+
+### Graceful shutdown: finishing the batch in flight
+
+If the app is stopped (a deploy, a restart, `docker stop`) while the worker is sending a batch, the deliveries that were claimed but not finished stay in `SENDING`. They are not lost, the lease brings them back after 2 minutes, but a request that was already on its way may then be sent a second time.
+
+I tested it by stopping the container in the middle of a 10-delivery batch that included two subscribers taking 4 to 5 seconds each. Spring 7 already waited for the running `@Scheduled` task: the shutdown signal arrived at 14.98 s, the last three deliveries were still sent and recorded, and the database pool was closed only at 16.72 s, after the batch. That corrected my assumption that scheduled tasks are cut off by default.
+
+The waiting has limits, though. Spring waits at most 30 s per shutdown phase, and `docker stop` sends `SIGKILL` 10 s after `SIGTERM`, while the worst case for one batch is 10 × 7 s (2 s connect + 5 s read timeout) = 70 s. So the limits are now explicit and sized from that number: `spring.lifecycle.timeout-per-shutdown-phase: 80s`, scheduler `await-termination` of 80 s, and `stop_grace_period: 90s` for the app container. The Dockerfile uses the exec form of `ENTRYPOINT`, so the JVM itself receives the signal.
 
 ## Known limitations (to be addressed in the next phases)
 

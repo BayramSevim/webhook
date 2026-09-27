@@ -1,11 +1,13 @@
 package com.github.webhook.repository;
 
 import com.github.webhook.entity.Delivery;
+import com.github.webhook.entity.DeliveryStatus;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -27,4 +29,6 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
         FOR UPDATE OF d SKIP LOCKED
         """, nativeQuery = true)
     List<Delivery> findDue(@Param("batchSize") int batchSize);
+
+    long countByStatusIn(Collection<DeliveryStatus> statuses);
 }

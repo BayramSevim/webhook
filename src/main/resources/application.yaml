@@ -22,6 +22,7 @@ spring:
 
 server:
   shutdown: graceful
+  port: 8082
 
 webhook:
   dispatch: kafka
@@ -34,7 +35,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: always
+  metrics:
+    distribution:
+      percentiles-histogram:
+        webhook.delivery.duration: true
