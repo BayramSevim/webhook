@@ -4,6 +4,12 @@
 
 A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background, signs every request and keeps a full audit trail of every attempt.
 
+
+## Demo
+https://github.com/user-attachments/assets/16b8579e-cced-41d1-8e6b-6b28ad8ffdc0
+
+*The shipping partner is down at first: its deliveries fail and are retried with backoff. Once it recovers, every waiting delivery goes out and nothing is lost. The Grafana dashboard follows along. (The small order page in the video is a throwaway UI made only for this recording; it is not part of the repository.)*
+
 ## What problem does it solve?
 
 Imagine a marketplace seller who runs a stock system and an accounting system outside the marketplace. When a customer places an order, both systems need to know about it right away. Instead of polling the marketplace every few minutes, they register a URL once and the marketplace **pushes** the event to them.
