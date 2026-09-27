@@ -5,6 +5,7 @@ import com.github.webhook.entity.Delivery;
 import com.github.webhook.entity.DeliveryAttempt;
 import com.github.webhook.entity.DeliveryStatus;
 import com.github.webhook.entity.Subscription;
+import com.github.webhook.mapper.DeliveryMapper;
 import com.github.webhook.repository.DeliveryAttemptRepository;
 import com.github.webhook.repository.DeliveryRepository;
 import org.springframework.stereotype.Service;
@@ -25,14 +26,16 @@ public class DeliveryStateService {
     private final DeliveryRepository deliveryRepository;
     private final DeliveryAttemptRepository deliveryAttemptRepository;
     private final BackoffPolicy backoffPolicy;
+    private final DeliveryMapper deliveryMapper;
 
     private static final int CIRCUIT_THRESHOLD = 5;
     private static final Duration CIRCUIT_OPEN_FOR = Duration.ofMinutes(1);
 
-    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy) {
+    public DeliveryStateService(DeliveryRepository deliveryRepository, DeliveryAttemptRepository deliveryAttemptRepository, BackoffPolicy backoffPolicy, DeliveryMapper deliveryMapper) {
         this.deliveryRepository = deliveryRepository;
         this.deliveryAttemptRepository = deliveryAttemptRepository;
         this.backoffPolicy = backoffPolicy;
+        this.deliveryMapper = deliveryMapper;
     }
 
     @Transactional
@@ -41,14 +44,7 @@ public class DeliveryStateService {
                 .stream()
                 .map(delivery -> {
                     delivery.markSending(Instant.now().plus(LEASE));
-                    return new DeliveryJob(
-                            delivery.getId(),
-                            delivery.getSubscription().getId(),
-                            delivery.getSubscription().getUrl(),
-                            delivery.getSubscription().getSecret(),
-                            delivery.getEvent().getEventType(),
-                            delivery.getEvent().getPayload()
-                    );
+                    return deliveryMapper.toJob(delivery);
                 }).toList();
     }
 
@@ -91,13 +87,6 @@ public class DeliveryStateService {
     public Optional<DeliveryJob> loadJob(UUID deliveryId) {
         return deliveryRepository.findById(deliveryId)
                 .filter(delivery -> delivery.getStatus() == DeliveryStatus.SENDING)
-                .map(delivery -> new DeliveryJob(
-                        delivery.getId(),
-                        delivery.getSubscription().getId(),
-                        delivery.getSubscription().getUrl(),
-                        delivery.getSubscription().getSecret(),
-                        delivery.getEvent().getEventType(),
-                        delivery.getEvent().getPayload()
-                ));
+                .map(deliveryMapper::toJob);
     }
 }
