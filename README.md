@@ -4,8 +4,8 @@
 
 A webhook delivery platform built with Java 21 and Spring Boot. Tenants register endpoints for the event types they care about; when an event happens, the service fans it out to every matching endpoint, delivers it over HTTP in the background, signs every request and keeps a full audit trail of every attempt.
 
-
 ## Demo
+
 https://github.com/user-attachments/assets/16b8579e-cced-41d1-8e6b-6b28ad8ffdc0
 
 *The shipping partner is down at first: its deliveries fail and are retried with backoff. Once it recovers, every waiting delivery goes out and nothing is lost. The Grafana dashboard follows along. (The small order page in the video is a throwaway UI made only for this recording; it is not part of the repository.)*
@@ -284,33 +284,6 @@ The backlog is the number to alert on: if it keeps growing, deliveries are comin
 
 ## Design decisions
 
-<!--
-  BU BÖLÜMÜ SEN YAZACAKSIN.
-  Her başlığın altına 2-4 cümle. Kendi kelimelerinle, mülakatta nasıl anlatacaksan öyle.
-  Türkçe yazıp sonra birlikte İngilizceye çevirebiliriz.
-  Her başlıktaki yorum satırı sana ne yazman gerektiğini hatırlatıyor; bitince yorumları sil.
--->
-
-### Why separate `events`, `deliveries` and `delivery_attempts` tables?
-
-<!-- Bir olay birden fazla aboneye gidiyor ve her birinin sonucu farklı olabiliyor. Sayaç yerine deneme tablosu tutmak neyi kazandırıyor? (Ayşe "neden gelmedi?" diye sorunca ne gösteriyorsun?) -->
-
-### Why UUIDs for deliveries but `bigint` for attempts?
-
-<!-- Karar kriteri: ID dışarı çıkıyor mu? Delivery ID'si nerelerde görünüyor, attempt ID'si nerede? -->
-
-### Delivery guarantee: at-least-once, not exactly-once
-
-<!-- Timeout aldığında karşı taraf mesajı aldı mı bilemezsin. Bu yüzden ne seçtin? Webhook-Id neden her denemede aynı? -->
-
-### Why `202 Accepted` for events but `201 Created` for subscriptions?
-
-<!-- İş bitti mi, bitmedi mi? (Artık 202 daha da anlamlı: teslimat gerçekten sonra yapılıyor.) -->
-
-### Fixing an N+1 query on the delivery list
-
-<!-- SQL logunda ne gördün (kaç sorgu)? Sebebi neydi (LAZY)? Neyle çözdün, sonuç ne oldu? Alternatifler neydi? -->
-
 ### Idempotency: an application check plus a unique constraint
 
 The service first looks up the `Idempotency-Key`; if it was already used, the stored response is returned. That check alone is not enough: when I sent the same key from two Postman tabs at the same time, both requests saw "not found" and both tried to insert. The `unique (tenant_id, idempotency_key)` constraint is the last line of defence and rejects the second insert.
@@ -360,17 +333,6 @@ Once the tenant has fixed the problem, `POST /deliveries/{id}/retry` puts the de
 At first `attempt_count` did two jobs: it was the retry budget ("how many attempts are left?") and it was also used as the attempt number written to `delivery_attempts`. Adding manual retry exposed the problem. `requeue()` resets the counter to 0, so the next failed attempt would have been recorded as attempt number 1 again, which already existed. The `unique (delivery_id, attempt_number)` constraint would reject it, the result would never be recorded, the delivery would stay in `SENDING`, and every time the lease expired it would be sent again: an endless loop hitting the subscriber every 2 minutes.
 
 The fix was to separate the two meanings. `attempt_count` is now only the retry budget and may be reset; the attempt number comes from the number of rows already in `delivery_attempts` for that delivery, plus one. After a manual retry the history simply continues with attempts 6, 7, 8…, which is exactly what the experiment showed.
-
-### Signing webhooks with HMAC
-
-<!-- (Faz 1.5 provasında dolduracağız) İmza olmasaydı saldırgan ne yapabilirdi? Neden Webhook-Id ve zaman damgası da imzalanıyor?
-     Retry'da hangi header'lar değişiyor, neden? Alıcı tarafında doğrulama deneyi ve jsonb boşluk tuzağı. -->
-
-### Circuit breaker per subscriber, stored in the database
-
-<!-- (Faz 1.5 provasında dolduracağız) Neden abone başına? Neden hafızada değil veritabanında (iki instance, Resilience4j farkı)?
-     Sigorta atıkken deneme hakları neden yanmıyor? Deney: 36 sn boyunca FAILED:3 FAILED:3 FAILED:2 değişmedi.
-     FOR UPDATE OF d neden? -->
 
 ### Kafka mode: one processor, two triggers, no dispatcher interface
 
