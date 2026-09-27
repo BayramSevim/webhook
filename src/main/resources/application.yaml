@@ -22,7 +22,6 @@ spring:
 
 server:
   shutdown: graceful
-  port: 8082
 
 webhook:
   dispatch: kafka
